@@ -10,6 +10,7 @@ int main() {
     int sock = 0;
     struct sockaddr_in serv_addr;
     char buffer[1024] = {0};
+    char channel_name[50];
 
     // Création du socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -32,7 +33,15 @@ int main() {
         return -1;
     }
 
-    // Recevoir un message du serveur
+    // Demander au client le nom du canal
+    printf("Entrez le nom du canal : ");
+    fgets(channel_name, sizeof(channel_name), stdin);
+    channel_name[strcspn(channel_name, "\n")] = 0; // Retirer le \n
+
+    // Envoyer le nom du canal au serveur
+    send(sock, channel_name, strlen(channel_name), 0);
+
+    // Recevoir la réponse du serveur
     read(sock, buffer, 1024);
     printf("Message du serveur : %s\n", buffer);
 
