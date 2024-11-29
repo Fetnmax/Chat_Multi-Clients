@@ -11,6 +11,7 @@ int main() {
     struct sockaddr_in serv_addr;
     char buffer[1024] = {0};
     char channel_name[50];
+    char message[1024];
 
     // Création du socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -42,8 +43,28 @@ int main() {
     send(sock, channel_name, strlen(channel_name), 0);
 
     // Recevoir la réponse du serveur
-    read(sock, buffer, 1024);
+    read(sock, buffer, sizeof(buffer));
     printf("Message du serveur : %s\n", buffer);
+
+    // Boucle pour envoyer des messages
+    while (1) {
+        printf("Entrez un message (ou 'exit' pour quitter) : ");
+        fgets(message, sizeof(message), stdin);
+        message[strcspn(message, "\n")] = 0; // Retirer le \n
+
+        if (strcmp(message, "exit") == 0) {
+            printf("Déconnexion...\n");
+            break;
+        }
+
+        // Envoyer le message au serveur
+        send(sock, message, strlen(message), 0);
+
+        // Recevoir la confirmation du serveur
+        memset(buffer, 0, sizeof(buffer));
+        read(sock, buffer, sizeof(buffer));
+        printf("Serveur : %s\n", buffer);
+    }
 
     // Fermeture du socket
     close(sock);
