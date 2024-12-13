@@ -13,6 +13,7 @@
 #define MAX_MESSAGES 1000
 #define MAX_MESSAGE_LENGTH 1024
 #define MAX_CLIENTS_PER_CHANNEL 100
+#define CHUNK_SIZE 8192
 
 typedef struct {
     int socket;
@@ -23,7 +24,7 @@ typedef struct {
     char name[50];
     char messages[MAX_MESSAGES][MAX_MESSAGE_LENGTH];
     int message_count;
-    Client clients[MAX_CLIENTS_PER_CHANNEL]; 
+    Client clients[MAX_CLIENTS_PER_CHANNEL];
     int client_count;
 } Channel;
 
@@ -38,13 +39,10 @@ ssize_t read_line(int sock, char *buffer, size_t max_len) {
         char c;
         ssize_t bytes = read(sock, &c, 1);
         if (bytes <= 0) {
-            if (total == 0)
-                return bytes;
+            if (total == 0) return bytes;
             break;
         }
-        if (c == '\n') {
-            break;
-        }
+        if (c == '\n') break;
         buffer[total++] = c;
     }
     buffer[total] = '\0';
@@ -54,14 +52,12 @@ ssize_t read_line(int sock, char *buffer, size_t max_len) {
 // Fonction pour trouver ou créer un canal
 int find_or_create_channel(const char *name) {
     pthread_mutex_lock(&channel_lock);
-    // Vérifier si le canal existe déjà
     for (int i = 0; i < channel_count; i++) {
         if (strcmp(channels[i].name, name) == 0) {
             pthread_mutex_unlock(&channel_lock);
             return i;
         }
     }
-    // Créer un nouveau canal s'il reste de la place
     if (channel_count < MAX_CHANNELS) {
         strcpy(channels[channel_count].name, name);
         channels[channel_count].message_count = 0;
@@ -91,7 +87,6 @@ void remove_client_from_channel(int channel_index, int client_socket) {
     Channel *channel = &channels[channel_index];
     for (int i = 0; i < channel->client_count; i++) {
         if (channel->clients[i].socket == client_socket) {
-            // Décaler les clients restants
             for (int j = i; j < channel->client_count - 1; j++) {
                 channel->clients[j] = channel->clients[j + 1];
             }
@@ -107,19 +102,58 @@ void add_message_to_channel(int channel_index, const char *message) {
     pthread_mutex_lock(&channel_lock);
     Channel *channel = &channels[channel_index];
 
-    // Ajouter le message au tableau en mémoire
     if (channel->message_count < MAX_MESSAGES) {
         strcpy(channel->messages[channel->message_count++], message);
     }
 
-    // Enregistrer le message dans le fichier du canal sans ajouter un \n supplémentaire
     char filename[100];
     snprintf(filename, sizeof(filename), "channel_%s.txt", channel->name);
     FILE *file = fopen(filename, "a");
     if (file != NULL) {
-        fprintf(file, "%s", message); // Assurez-vous que 'message' se termine déjà par '\n'
+        fprintf(file, "%s", message);
         fclose(file);
     }
+    pthread_mutex_unlock(&channel_lock);
+}
+
+// Fonction pour transférer un fichier entre clients
+void forward_file(int from_socket, const char *filename, long filesize, int channel_index) {
+    pthread_mutex_lock(&channel_lock);
+    Channel *channel = &channels[channel_index];
+
+    // Envoyer l'en-tête du fichier à tous les clients sauf l'émetteur
+    char header[1024];
+    snprintf(header, sizeof(header), "/file\n%s\n%ld\n", filename, filesize);
+
+    for (int i = 0; i < channel->client_count; i++) {
+        if (channel->clients[i].socket != from_socket) {
+            if (send(channel->clients[i].socket, header, strlen(header), 0) < 0) {
+                printf("Erreur: Envoi de l'en-tête du fichier à %s a échoué.\n", channel->clients[i].username);
+            }
+        }
+    }
+
+    // Transférer le contenu du fichier
+    char buffer[CHUNK_SIZE];
+    long remaining = filesize;
+    while (remaining > 0) {
+        size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+        ssize_t bytes_read = read(from_socket, buffer, to_read);
+        if (bytes_read <= 0) {
+            printf("Erreur: Réception du fichier interrompue.\n");
+            break;
+        }
+
+        for (int i = 0; i < channel->client_count; i++) {
+            if (channel->clients[i].socket != from_socket) {
+                if (send(channel->clients[i].socket, buffer, bytes_read, 0) < 0) {
+                    printf("Erreur: Transfert du fichier à %s a échoué.\n", channel->clients[i].username);
+                }
+            }
+        }
+        remaining -= bytes_read;
+    }
+
     pthread_mutex_unlock(&channel_lock);
 }
 
@@ -127,33 +161,31 @@ void add_message_to_channel(int channel_index, const char *message) {
 void *handle_client(void *arg) {
     int client_socket = *(int *)arg;
     free(arg);
-    char buffer[1024] = {0};
+    char buffer[CHUNK_SIZE] = {0};
     int channel_index;
     char username[50];
 
-    // Lire le pseudonyme (première ligne)
+    // Lire le pseudonyme
     ssize_t bytes = read_line(client_socket, username, sizeof(username));
     if (bytes <= 0) {
         close(client_socket);
         pthread_exit(NULL);
     }
 
-    printf("Pseudonyme reçu : %s\n", username);
-
-    // Lire le nom du canal (deuxième ligne)
+    // Lire le nom du canal
     bytes = read_line(client_socket, buffer, sizeof(buffer));
     if (bytes <= 0) {
         close(client_socket);
         pthread_exit(NULL);
     }
 
-    printf("Nom du canal reçu : %s\n", buffer);
+    printf("Utilisateur %s demande de connexion au canal : %s\n", username, buffer);
 
     channel_index = find_or_create_channel(buffer);
     if (channel_index != -1) {
         add_client_to_channel(channel_index, client_socket, username);
 
-        // Envoyer l'historique au client
+        // Envoyer l'historique des messages
         char filename[100];
         snprintf(filename, sizeof(filename), "channel_%s.txt", channels[channel_index].name);
         FILE *file = fopen(filename, "r");
@@ -164,6 +196,7 @@ void *handle_client(void *arg) {
             }
             fclose(file);
         }
+
         // Indiquer la fin de l'historique
         char *end_of_history = "<end_of_history>\n";
         send(client_socket, end_of_history, strlen(end_of_history), 0);
@@ -176,45 +209,45 @@ void *handle_client(void *arg) {
 
     while (1) {
         memset(buffer, 0, sizeof(buffer));
-        int bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
+        ssize_t bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
         if (bytes_read <= 0) {
             printf("Client %s déconnecté.\n", username);
             break;
         }
         buffer[bytes_read] = '\0';
 
-        // Assurez-vous que le message se termine par \n
-        if (buffer[bytes_read -1] != '\n') {
-            strcat(buffer, "\n");
+        // Vérifier si c'est une commande de fichier
+        if (strncmp(buffer, "/file\n", 6) == 0) {
+            char filename[256];
+            long filesize;
+            sscanf(buffer + 6, "%s\n%ld\n", filename, &filesize);
+            forward_file(client_socket, filename, filesize, channel_index);
+            continue;
         }
 
-        // Obtenir l'heure actuelle
+        // Traiter comme un message normal
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
-        char time_str[9]; // HH:MM:SS
+        char time_str[9];
         strftime(time_str, sizeof(time_str), "%H:%M:%S", t);
 
-        // Préparer le message avec le nom d'utilisateur et l'heure
         char full_message[2048];
-        snprintf(full_message, sizeof(full_message), "[%s][%s]: %s", time_str, username, buffer);
+        snprintf(full_message, sizeof(full_message), "[%s][%s]: %s\n", time_str, username, buffer);
 
-        printf("Message reçu sur le canal %s de %s: %s", channels[channel_index].name, username, buffer);
-
-        // Ajouter le message au canal
         add_message_to_channel(channel_index, full_message);
 
-        // Diffuser le message à tous les clients du canal sauf l'émetteur
         pthread_mutex_lock(&channel_lock);
         Channel *channel = &channels[channel_index];
         for (int i = 0; i < channel->client_count; i++) {
-            if (channel->clients[i].socket != client_socket) { // Ne pas renvoyer au client émetteur
-                send(channel->clients[i].socket, full_message, strlen(full_message), 0);
+            if (channel->clients[i].socket != client_socket) {
+                if (send(channel->clients[i].socket, full_message, strlen(full_message), 0) < 0) {
+                    printf("Erreur: Envoi du message à %s a échoué.\n", channel->clients[i].username);
+                }
             }
         }
         pthread_mutex_unlock(&channel_lock);
     }
 
-    // Nettoyer lors de la déconnexion
     remove_client_from_channel(channel_index, client_socket);
     close(client_socket);
     pthread_exit(NULL);
