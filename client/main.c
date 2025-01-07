@@ -11,8 +11,6 @@
 #define PORT 8080
 #define CLEAR_SCREEN "\033[2J"
 #define CURSOR_HOME "\033[H"
-#define SAVE_CURSOR "\033[s"
-#define RESTORE_CURSOR "\033[u"
 #define SEPARATOR_LINE 23
 #define PROMPT_LINE 24
 #define CURSOR_TO_INPUT "\033[24;1H"
@@ -21,11 +19,11 @@
 #define CHUNK_SIZE 8192
 #define DOWNLOADS_DIR "downloads"
 
-// Couleurs pour l'affichage
+// Couleurs
 #define COLOR_RESET "\033[0m"
-#define COLOR_SEND "\033[1;34m"    // Bleu pour les envois de fichiers
-#define COLOR_RECEIVE "\033[1;32m" // Vert pour les réceptions de fichiers
-#define COLOR_SYSTEM "\033[1;33m"  // Jaune pour les messages système
+#define COLOR_SEND "\033[1;34m"
+#define COLOR_RECEIVE "\033[1;32m"
+#define COLOR_SYSTEM "\033[1;33m"
 
 typedef struct {
     int sock;
@@ -35,8 +33,8 @@ typedef struct {
 
 typedef struct {
     char content[2048];
-    int is_file_transfer; // 1 si le message est lié à un transfert de fichier
-    int is_send;          // 1 pour les envois, 0 pour les réceptions
+    int is_file_transfer;
+    int is_send;
 } Message;
 
 Message message_buffer[MAX_MESSAGES];
@@ -53,24 +51,20 @@ void setup_terminal(const char *channel_name) {
     fflush(stdout);
 }
 
-// Affichage des messages
+// Affiche la liste des messages
 void display_messages(void) {
     pthread_mutex_lock(&message_lock);
 
-    // Effacer la zone des messages (lignes 2-22)
+    // Efface la zone des messages
     for (int i = 2; i <= 22; i++) {
-        printf("\033[%d;0H", i);
-        printf(CLEAR_LINE);
+        printf("\033[%d;0H%s", i, CLEAR_LINE);
     }
 
-    // Afficher les messages
     int start = (message_count > 20) ? message_count - 20 : 0;
     int line = 2;
     for (int i = start; i < message_count; i++) {
         printf("\033[%d;0H", line++);
         if (message_buffer[i].is_file_transfer) {
-            // Envoi de fichier => Bleu
-            // Réception de fichier => Vert
             if (message_buffer[i].is_send) {
                 printf(COLOR_SEND "%s" COLOR_RESET, message_buffer[i].content);
             } else {
@@ -82,22 +76,19 @@ void display_messages(void) {
             strncmp(message_buffer[i].content, "Fichier envoyé", 14) == 0 ||
             strncmp(message_buffer[i].content, "Déconnecté", 10) == 0
         ) {
-            // Messages système ou d'erreur => Jaune
             printf(COLOR_SYSTEM "%s" COLOR_RESET, message_buffer[i].content);
         } else {
-            // Message normal
             printf("%s", message_buffer[i].content);
         }
     }
 
-    // Ligne de séparation et prompt
     printf("\033[%d;0H=======================\n", SEPARATOR_LINE);
     printf("\033[%d;0H>", PROMPT_LINE);
     fflush(stdout);
     pthread_mutex_unlock(&message_lock);
 }
 
-// Fonction pour envoyer un fichier
+// Envoi d'un fichier
 void send_file(int sock, const char *filepath) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
@@ -120,11 +111,10 @@ void send_file(int sock, const char *filepath) {
     long filesize = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    // Nom du fichier depuis filepath
     char *filename = strrchr(filepath, '/');
-    filename = (filename) ? filename + 1 : (char *)filepath;
+    filename = (filename) ? (filename + 1) : (char *)filepath;
 
-    // En-tête
+    // Envoi de l'en-tête
     char header[1024];
     snprintf(header, sizeof(header), "/file\n%s\n%ld\n", filename, filesize);
     if (send(sock, header, strlen(header), 0) < 0) {
@@ -143,7 +133,7 @@ void send_file(int sock, const char *filepath) {
         return;
     }
 
-    // Contenu
+    // Envoi du contenu
     char buffer[CHUNK_SIZE];
     size_t bytes_read;
     int send_success = 1;
@@ -166,6 +156,7 @@ void send_file(int sock, const char *filepath) {
     }
     fclose(file);
 
+    // Message de confirmation si tout est envoyé
     if (send_success) {
         pthread_mutex_lock(&message_lock);
         snprintf(
@@ -182,7 +173,7 @@ void send_file(int sock, const char *filepath) {
     }
 }
 
-// Fonction pour recevoir un fichier
+// Réception d'un fichier
 void receive_file(const char *filename, long filesize, int sock) {
     mkdir(DOWNLOADS_DIR, 0777);
 
@@ -210,8 +201,8 @@ void receive_file(const char *filename, long filesize, int sock) {
     long remaining = filesize;
     while (remaining > 0) {
         size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-        ssize_t bytes_read = recv(sock, buffer, to_read, 0);
-        if (bytes_read <= 0) {
+        ssize_t rd = recv(sock, buffer, to_read, 0);
+        if (rd <= 0) {
             pthread_mutex_lock(&message_lock);
             snprintf(
                 message_buffer[message_count].content,
@@ -226,8 +217,8 @@ void receive_file(const char *filename, long filesize, int sock) {
             fclose(file);
             return;
         }
-        fwrite(buffer, 1, bytes_read, file);
-        remaining -= bytes_read;
+        fwrite(buffer, 1, rd, file);
+        remaining -= rd;
     }
     fclose(file);
 
@@ -270,58 +261,53 @@ void *receive_messages(void *arg) {
             exit(1);
         }
 
-        // Parcourir le buffer pour gérer les messages et fichiers
         char *ptr = buffer;
         char *end = buffer + bytes_read;
         while (ptr < end) {
-            // Détecter l'en-tête de fichier
-            if (strncmp(ptr, "/file\n", 6) == 0) {
-                char filename[256];
-                long filesize = 0;
+            if (!strncmp(ptr, "/file\n", 6)) {
+                // En-tête de fichier
+                char fn[256];
+                long sz = 0;
                 int header_consumed = 0;
-
-                // Extraire l'en-tête
-                int scanned = sscanf(
-                    ptr + 6,
-                    "%255s\n%ld\n%n",
-                    filename,
-                    &filesize,
-                    &header_consumed
-                );
-                if (scanned == 2) {
-                    // Avancer dans le buffer après l'en-tête
+                int sc = sscanf(ptr + 6, "%255s\n%ld\n%n", fn, &sz, &header_consumed);
+                if (sc == 2) {
                     ptr += 6 + header_consumed;
-                    // Recevoir le fichier
-                    receive_file(filename, filesize, data->sock);
+                    receive_file(fn, sz, data->sock);
                 } else {
-                    // En-tête incomplète, on sort de la boucle pour lire la suite plus tard
+                    // En-tête incomplète => on récupère plus tard
                     break;
                 }
             } else {
-                // Traitement d'un message normal
+                // Message texte
                 char *newline = memchr(ptr, '\n', end - ptr);
                 if (!newline) {
-                    // Pas de '\n' => message incomplet
+                    // Morceau de message incomplet
                     break;
                 }
                 size_t msg_len = (newline - ptr) + 1;
-                char msg[2048];
-                if (msg_len >= sizeof(msg)) {
-                    // Message trop grand, on le tronque
-                    msg_len = sizeof(msg) - 1;
+                if (msg_len > 2047) {
+                    msg_len = 2047;
                 }
+
+                char msg[2048];
                 strncpy(msg, ptr, msg_len);
                 msg[msg_len] = '\0';
 
-                // Vérifier si c'est la fin de l'historique
-                if (receiving_history && strcmp(msg, "<end_of_history>\n") == 0) {
+                // Fin de l'historique ?
+                if (receiving_history && !strcmp(msg, "<end_of_history>\n")) {
                     receiving_history = 0;
                 } else {
+                    // Retirer le '\n' éventuel si on veut éviter les doubles sauts
+                    size_t mlen = strlen(msg);
+                    if (mlen > 0 && msg[mlen - 1] == '\n') {
+                        msg[mlen - 1] = '\0';
+                    }
+
                     pthread_mutex_lock(&message_lock);
                     snprintf(
                         message_buffer[message_count].content,
                         sizeof(message_buffer[message_count].content),
-                        "%s",
+                        "%s\n",
                         msg
                     );
                     message_buffer[message_count].is_file_transfer = 0;
@@ -330,7 +316,6 @@ void *receive_messages(void *arg) {
                     pthread_mutex_unlock(&message_lock);
                     display_messages();
                 }
-
                 ptr += msg_len;
             }
         }
@@ -339,13 +324,14 @@ void *receive_messages(void *arg) {
 }
 
 int main() {
-    int sock = 0;
+    int sock;
     struct sockaddr_in serv_addr;
     char channel_name[50];
     char message[1024];
     char username[50];
     ThreadData thread_data;
 
+    // Création du socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         printf("Erreur lors de la création du socket\n");
         return -1;
@@ -353,7 +339,6 @@ int main() {
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
-
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
         printf("Adresse invalide ou non supportée\n");
         return -1;
@@ -364,23 +349,25 @@ int main() {
         return -1;
     }
 
+    // Récupération du pseudo
     printf("Entrez votre nom d'utilisateur : ");
-    if (fgets(username, sizeof(username), stdin) == NULL) {
+    if (!fgets(username, sizeof(username), stdin)) {
         printf("Erreur de lecture du nom d'utilisateur.\n");
         close(sock);
         return -1;
     }
     username[strcspn(username, "\n")] = 0;
 
+    // Récupération du nom de canal
     printf("Entrez le nom du canal : ");
-    if (fgets(channel_name, sizeof(channel_name), stdin) == NULL) {
+    if (!fgets(channel_name, sizeof(channel_name), stdin)) {
         printf("Erreur de lecture du nom du canal.\n");
         close(sock);
         return -1;
     }
     channel_name[strcspn(channel_name, "\n")] = 0;
 
-    // Envoi des infos de connexion (pseudo et canal)
+    // Envoi des infos initiales
     char send_buffer[1050];
     snprintf(send_buffer, sizeof(send_buffer), "%s\n%s\n", username, channel_name);
     if (send(sock, send_buffer, strlen(send_buffer), 0) < 0) {
@@ -398,29 +385,29 @@ int main() {
     pthread_t recv_thread;
     pthread_create(&recv_thread, NULL, receive_messages, &thread_data);
 
+    // Boucle d'envoi
     while (1) {
-        // Placer le curseur dans la zone de saisie
         printf(CURSOR_TO_INPUT);
         printf(CLEAR_LINE);
         printf(">");
         fflush(stdout);
 
-        if (fgets(message, sizeof(message), stdin) == NULL) {
+        if (!fgets(message, sizeof(message), stdin)) {
             break;
         }
-        message[strcspn(message, "\n")] = 0; // Retirer le '\n'
+        message[strcspn(message, "\n")] = 0;
 
-        if (strcmp(message, "/exit") == 0) {
+        // Quitter
+        if (!strcmp(message, "/exit")) {
             break;
         }
-
-        // Vérifier si commande d'envoi de fichier
-        if (strncmp(message, "/send ", 6) == 0) {
+        // Envoi d'un fichier
+        if (!strncmp(message, "/send ", 6)) {
             send_file(sock, message + 6);
-            continue; // Ne pas envoyer la commande elle-même
+            continue;
         }
 
-        // Envoyer le message
+        // Envoi d'un message texte
         char message_to_send[1050];
         snprintf(message_to_send, sizeof(message_to_send), "%s\n", message);
         if (send(sock, message_to_send, strlen(message_to_send), 0) < 0) {
@@ -438,7 +425,7 @@ int main() {
             continue;
         }
 
-        // Ajouter le message localement
+        // Afficher localement le message envoyé
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
         char time_str[9];
@@ -456,7 +443,6 @@ int main() {
         message_buffer[message_count].is_send = 0;
         message_count++;
         pthread_mutex_unlock(&message_lock);
-
         display_messages();
     }
 
