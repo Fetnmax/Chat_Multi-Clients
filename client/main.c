@@ -1,3 +1,13 @@
+/**
+ * @brief Client de chat en C avec support de transfert de fichiers
+ * 
+ * Fonctionnalités:
+ * - Interface utilisateur en console avec zone de messages et ligne de saisie
+ * - Support des canaux de discussion
+ * - Transfert de fichiers
+ * - Affichage coloré des messages système
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,40 +18,49 @@
 #include <time.h>
 #include <sys/stat.h>
 
+
+// Configuration du serveur et des constantes
 #define PORT 8080
+#define MAX_MESSAGES 1000
+#define CHUNK_SIZE 8192
+#define DOWNLOADS_DIR "downloads"
+
+// Constantes pour l'interface console
 #define CLEAR_SCREEN "\033[2J"
 #define CURSOR_HOME "\033[H"
 #define SEPARATOR_LINE 23
 #define PROMPT_LINE 24
 #define CURSOR_TO_INPUT "\033[24;1H"
 #define CLEAR_LINE "\033[K"
-#define MAX_MESSAGES 1000
-#define CHUNK_SIZE 8192
-#define DOWNLOADS_DIR "downloads"
 
-// Couleurs
+// Codes couleur pour les messages
 #define COLOR_RESET "\033[0m"
-#define COLOR_SEND "\033[1;34m"
-#define COLOR_RECEIVE "\033[1;32m"
-#define COLOR_SYSTEM "\033[1;33m"
+#define COLOR_SEND "\033[1;34m" // Bleu pour les envois
+#define COLOR_RECEIVE "\033[1;32m" // Vert pour les réceptions
+#define COLOR_SYSTEM "\033[1;33m" // Jaune pour les messages système
 
+// Structure pour les données de thread
 typedef struct {
     int sock;
     char channel_name[50];
     char username[50];
 } ThreadData;
 
+// Structure pour les messages
 typedef struct {
     char content[2048];
     int is_file_transfer;
     int is_send;
 } Message;
 
+// Variables globales
 Message message_buffer[MAX_MESSAGES];
 int message_count = 0;
 pthread_mutex_t message_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// Configuration du terminal
+/**
+ * Configure l'interface du terminal
+ */
 void setup_terminal(const char *channel_name) {
     printf(CLEAR_SCREEN);
     printf(CURSOR_HOME);
@@ -51,19 +70,24 @@ void setup_terminal(const char *channel_name) {
     fflush(stdout);
 }
 
-// Affiche la liste des messages
+/**
+ * Affiche tous les messages dans la zone de chat
+ */
 void display_messages(void) {
     pthread_mutex_lock(&message_lock);
 
-    // Efface la zone des messages
+    // Nettoie la zone d'affichage
     for (int i = 2; i <= 22; i++) {
         printf("\033[%d;0H%s", i, CLEAR_LINE);
     }
 
+    // Affiche les 20 derniers messages
     int start = (message_count > 20) ? message_count - 20 : 0;
     int line = 2;
     for (int i = start; i < message_count; i++) {
         printf("\033[%d;0H", line++);
+
+        // Choix de la couleur selon le type de message
         if (message_buffer[i].is_file_transfer) {
             if (message_buffer[i].is_send) {
                 printf(COLOR_SEND "%s" COLOR_RESET, message_buffer[i].content);
@@ -82,13 +106,16 @@ void display_messages(void) {
         }
     }
 
+     // Restaure la ligne de saisie
     printf("\033[%d;0H=======================\n", SEPARATOR_LINE);
     printf("\033[%d;0H>", PROMPT_LINE);
     fflush(stdout);
     pthread_mutex_unlock(&message_lock);
 }
 
-// Envoi d'un fichier
+/**
+ * Envoie un fichier au serveur
+ */
 void send_file(int sock, const char *filepath) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
@@ -107,10 +134,12 @@ void send_file(int sock, const char *filepath) {
         return;
     }
 
+    // Obtient la taille du fichier
     fseek(file, 0, SEEK_END);
     long filesize = ftell(file);
     fseek(file, 0, SEEK_SET);
 
+    // Extrait le nom du fichier du chemin
     char *filename = strrchr(filepath, '/');
     filename = (filename) ? (filename + 1) : (char *)filepath;
 
@@ -133,7 +162,7 @@ void send_file(int sock, const char *filepath) {
         return;
     }
 
-    // Envoi du contenu
+    // Envoi du contenu par morceaux
     char buffer[CHUNK_SIZE];
     size_t bytes_read;
     int send_success = 1;
@@ -156,7 +185,7 @@ void send_file(int sock, const char *filepath) {
     }
     fclose(file);
 
-    // Message de confirmation si tout est envoyé
+    // Confirmation d'envoi
     if (send_success) {
         pthread_mutex_lock(&message_lock);
         snprintf(
@@ -173,7 +202,9 @@ void send_file(int sock, const char *filepath) {
     }
 }
 
-// Réception d'un fichier
+/**
+ * Reçoit un fichier du serveur
+ */
 void receive_file(const char *filename, long filesize, int sock) {
     mkdir(DOWNLOADS_DIR, 0777);
 
@@ -197,6 +228,7 @@ void receive_file(const char *filename, long filesize, int sock) {
         return;
     }
 
+    // Réception par morceaux
     char buffer[CHUNK_SIZE];
     long remaining = filesize;
     while (remaining > 0) {
@@ -222,6 +254,7 @@ void receive_file(const char *filename, long filesize, int sock) {
     }
     fclose(file);
 
+    // Confirmation de réception
     pthread_mutex_lock(&message_lock);
     snprintf(
         message_buffer[message_count].content,
@@ -237,7 +270,9 @@ void receive_file(const char *filename, long filesize, int sock) {
     display_messages();
 }
 
-// Thread de réception
+/**
+ * Thread de réception des messages
+ */
 void *receive_messages(void *arg) {
     ThreadData *data = (ThreadData *)arg;
     char buffer[CHUNK_SIZE];
@@ -264,6 +299,7 @@ void *receive_messages(void *arg) {
         char *ptr = buffer;
         char *end = buffer + bytes_read;
         while (ptr < end) {
+            // Traitement des fichiers
             if (!strncmp(ptr, "/file\n", 6)) {
                 // En-tête de fichier
                 char fn[256];
@@ -277,7 +313,9 @@ void *receive_messages(void *arg) {
                     // En-tête incomplète => on récupère plus tard
                     break;
                 }
-            } else {
+            }
+            // Traitement des messages texte 
+            else {
                 // Message texte
                 char *newline = memchr(ptr, '\n', end - ptr);
                 if (!newline) {
@@ -347,6 +385,7 @@ int main() {
         return -1;
     }
 
+    // Configuration de l'adresse du serveur
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
@@ -354,12 +393,13 @@ int main() {
         return -1;
     }
 
+    // Connexion au serveur
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         printf("Échec de la connexion\n");
         return -1;
     }
 
-    // Récupération du pseudo
+    // Saisie des informations utilisateur
     printf("Entrez votre nom d'utilisateur : ");
     if (!fgets(username, sizeof(username), stdin)) {
         printf("Erreur de lecture du nom d'utilisateur.\n");
@@ -368,7 +408,6 @@ int main() {
     }
     username[strcspn(username, "\n")] = 0;
 
-    // Récupération du nom de canal
     printf("Entrez le nom du canal : ");
     if (!fgets(channel_name, sizeof(channel_name), stdin)) {
         printf("Erreur de lecture du nom du canal.\n");
@@ -377,7 +416,7 @@ int main() {
     }
     channel_name[strcspn(channel_name, "\n")] = 0;
 
-    // Envoi des infos initiales
+    // Envoi des informations au serveur
     char send_buffer[1050];
     snprintf(send_buffer, sizeof(send_buffer), "%s\n%s\n", username, channel_name);
     if (send(sock, send_buffer, strlen(send_buffer), 0) < 0) {
@@ -386,16 +425,19 @@ int main() {
         return -1;
     }
 
+    // Configuration de l'interface
     setup_terminal(channel_name);
 
+    // Initialisation des données du thread
     thread_data.sock = sock;
     strncpy(thread_data.channel_name, channel_name, sizeof(thread_data.channel_name) - 1);
     strncpy(thread_data.username, username, sizeof(thread_data.username) - 1);
 
+    // Démarrage du thread de réception
     pthread_t recv_thread;
     pthread_create(&recv_thread, NULL, receive_messages, &thread_data);
 
-    // Boucle d'envoi
+    // Boucle principale
     while (1) {
         printf(CURSOR_TO_INPUT);
         printf(CLEAR_LINE);
@@ -406,18 +448,22 @@ int main() {
             break;
         }
         message[strcspn(message, "\n")] = 0;
+        
+        // Bloquer l’envoi si la chaîne est vide
+        if (strlen(message) == 0) {
+            continue;
+        }
 
-        // Quitter
+        // Commandes spéciales
         if (!strcmp(message, "/exit")) {
             break;
         }
-        // Envoi d'un fichier
         if (!strncmp(message, "/send ", 6)) {
             send_file(sock, message + 6);
             continue;
         }
 
-        // Envoi d'un message texte
+        // Envoi du message
         char message_to_send[1050];
         snprintf(message_to_send, sizeof(message_to_send), "%s\n", message);
         if (send(sock, message_to_send, strlen(message_to_send), 0) < 0) {
@@ -435,7 +481,7 @@ int main() {
             continue;
         }
 
-        // Afficher localement le message envoyé
+        // Affichage local du message
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
         char time_str[9];
