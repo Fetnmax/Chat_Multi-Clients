@@ -295,7 +295,17 @@ void *receive_messages(void *arg) {
 
                 // Fin de l'historique ?
                 if (receiving_history && !strcmp(msg, "<end_of_history>\n")) {
-                    receiving_history = 0;
+                    pthread_mutex_lock(&message_lock);
+                    snprintf(
+                        message_buffer[message_count].content,
+                        sizeof(message_buffer[message_count].content),
+                        "-------- Fin de l'historique --------\n"
+                    );
+                    message_buffer[message_count].is_file_transfer = 0;
+                    message_buffer[message_count].is_send = 0;
+                    message_count++;
+                    pthread_mutex_unlock(&message_lock);
+                    display_messages();
                 } else {
                     // Retirer le '\n' éventuel si on veut éviter les doubles sauts
                     size_t mlen = strlen(msg);
