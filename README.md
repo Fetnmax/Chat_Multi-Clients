@@ -3,7 +3,7 @@
 - **/exit**  
   Ferme le client et termine la session.
 
-- **/send <nom-de-fichier>**  
+- **/send "fichier"**  
   Envoie un fichier au serveur pour qu’il soit retransmis aux autres utilisateurs.
   Le fichier inazuma.txt dans le dossier du client peut servir a tester cette commande.
 
